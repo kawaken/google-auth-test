@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/BurntSushi/toml"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -10,13 +11,16 @@ import (
 )
 
 const (
-	AUTH_URL      = "https://accounts.google.com/o/oauth2/device/code"
-	CLIENT_ID     = ""
-	CLIENT_SECRET = ""
-	POLLING_URL   = "https://www.googleapis.com/oauth2/v3/token"
-	SCOPE         = "email profile"
-	GRANT_TYPE    = "http://oauth.net/grant_type/device/1.0"
+	AUTH_URL    = "https://accounts.google.com/o/oauth2/device/code"
+	POLLING_URL = "https://www.googleapis.com/oauth2/v3/token"
+	SCOPE       = "email profile"
+	GRANT_TYPE  = "http://oauth.net/grant_type/device/1.0"
 )
+
+type Config struct {
+	CLIENT_ID     string
+	CLIENT_SECRET string
+}
 
 type DeviceToken struct {
 	DeviceCode      string `json:"device_code"`
@@ -36,21 +40,21 @@ type AuthToken struct {
 	ErrorDescription string `json:"error_description"`
 }
 
-type Pooling struct {
-	url     string
-	result  chan string
-	closing chan bool
-	err     error
-}
-
-func (p *Pooling) Close() error {
-	close(p.closing)
-	return p.err
+func loadConf() (conf *Config, err error) {
+	_, err = toml.DecodeFile("conf.toml", &conf)
+	return
 }
 
 func main() {
+
+	conf, err := loadConf()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
 	values := url.Values{}
-	values.Add("client_id", CLIENT_ID)
+	values.Add("client_id", conf.CLIENT_ID)
 	values.Add("scope", SCOPE)
 
 	resp, err := http.PostForm(AUTH_URL, values)
@@ -76,12 +80,12 @@ func main() {
 	fmt.Println("Access the following url:", dt.VerificationUrl)
 	fmt.Println("And enter the code:", dt.UserCode)
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 60; i++ {
 		time.Sleep(time.Duration(dt.Interval) * time.Second)
 
 		values = url.Values{}
-		values.Add("client_id", CLIENT_ID)
-		values.Add("client_secret", CLIENT_SECRET)
+		values.Add("client_id", conf.CLIENT_ID)
+		values.Add("client_secret", conf.CLIENT_SECRET)
 		values.Add("code", dt.DeviceCode)
 		values.Add("grant_type", GRANT_TYPE)
 		resp, err = http.PostForm(POLLING_URL, values)
@@ -105,14 +109,14 @@ func main() {
 			return
 		}
 
-		fmt.Println(at)
-
-		if at.Error == "" {
+		if at.Error == "" && at.AccessToken != "" {
 			fmt.Println("Verified")
 			break
 		}
 
-		fmt.Printf("%s: %s", at.Error, at.ErrorDescription)
+		fmt.Printf("%d\r", i)
 	}
+
+	fmt.Println("Unauthorized. Retry")
 
 }
