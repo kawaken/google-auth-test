@@ -28,12 +28,20 @@ type Config struct {
 	ExpiredAt     time.Time
 }
 
+type Tokener interface {
+	Token() string
+}
+
 type DeviceToken struct {
 	DeviceCode      string `json:"device_code"`
 	UserCode        string `json:"user_code"`
 	VerificationUrl string `json:"verification_url"`
 	ExpiresIn       int    `json:"expires_in"`
 	Interval        int
+}
+
+func (d *DeviceToken) Token() string {
+	return d.DeviceCode
 }
 
 type AuthToken struct {
@@ -46,12 +54,17 @@ type AuthToken struct {
 	ErrorDescription string `json:"error_description"`
 }
 
-func loadConf() (conf *Config, err error) {
-	_, err = toml.DecodeFile("conf.toml", &conf)
-	return
+func (a *AuthToken) Token() string {
+	return a.AccessToken
 }
 
-func writeConf(conf *Config) (err error) {
+func loadConfig() (*Config, error) {
+	conf := new(Config)
+	_, err := toml.DecodeFile("conf.toml", conf)
+	return conf, err
+}
+
+func (conf *Config) save() (err error) {
 
 	var buffer bytes.Buffer
 	encoder := toml.NewEncoder(&buffer)
@@ -63,27 +76,55 @@ func writeConf(conf *Config) (err error) {
 	return
 }
 
+func requestToken(url string, values url.Values, obj interface{}) error {
+	resp, err := http.PostForm(url, values)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(b, obj)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (conf *Config) refresh(at *AuthToken) error {
+	if at.Error != "" {
+		return fmt.Errorf("%s: %s", at.Error, at.ErrorDescription)
+	}
+
+	if at.AccessToken == "" {
+		return fmt.Errorf("Token is empty")
+	}
+
+	conf.AccessToken = at.AccessToken
+	// RefreshTokenを更新する必要がない場合は空文字になるので、上書きしない
+	if at.RefreshToken != "" {
+		conf.RefreshToken = at.RefreshToken
+	}
+	conf.ExpiredAt = time.Now().Add(time.Duration(at.ExpiresIn) * time.Second)
+
+	err := conf.save()
+	return err
+}
+
 func initAccessToken(conf *Config) {
+	fmt.Println("Init AccessToken")
 
 	values := url.Values{}
 	values.Add("client_id", conf.CLIENT_ID)
 	values.Add("scope", SCOPE)
 
-	resp, err := http.PostForm(AUTH_URL, values)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	defer resp.Body.Close()
-	b, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	var dt DeviceToken
-	err = json.Unmarshal(b, &dt)
+	dt := &DeviceToken{}
+	err := requestToken(AUTH_URL, values, dt)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -102,40 +143,19 @@ func initAccessToken(conf *Config) {
 		values.Add("client_secret", conf.CLIENT_SECRET)
 		values.Add("code", dt.DeviceCode)
 		values.Add("grant_type", GRANT_TYPE)
-		resp, err = http.PostForm(POLLING_URL, values)
 
+		at := &AuthToken{}
+		err = requestToken(POLLING_URL, values, at)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 
-		defer resp.Body.Close()
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Println(err)
+		err := conf.refresh(at)
+		if err == nil {
+			fmt.Println("Verified")
 			return
 		}
-
-		var at AuthToken
-		err = json.Unmarshal(b, &at)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		if at.Error == "" && at.AccessToken != "" {
-			fmt.Println("\nVerified")
-			conf.AccessToken = at.AccessToken
-			conf.RefreshToken = at.RefreshToken
-			conf.ExpiredAt = time.Now().Add(time.Duration(at.ExpiresIn) * time.Second)
-
-			err := writeConf(conf)
-			if err != nil {
-				fmt.Println(err)
-			}
-			return
-		}
-
 	}
 
 	fmt.Println("Unauthorized. Retry")
@@ -143,7 +163,7 @@ func initAccessToken(conf *Config) {
 }
 
 func refreshAccessToken(conf *Config) {
-	fmt.Println("refresh!!!!")
+	fmt.Println("Refresh AccessToken")
 
 	values := url.Values{}
 	values.Add("client_id", conf.CLIENT_ID)
@@ -151,46 +171,25 @@ func refreshAccessToken(conf *Config) {
 	values.Add("refresh_token", conf.RefreshToken)
 	values.Add("grant_type", "refresh_token")
 
-	resp, err := http.PostForm(POLLING_URL, values)
-
+	at := &AuthToken{}
+	err := requestToken(POLLING_URL, values, at)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	defer resp.Body.Close()
-	b, err := ioutil.ReadAll(resp.Body)
+	err = conf.refresh(at)
 	if err != nil {
 		fmt.Println(err)
-		return
+	} else {
+		fmt.Println("Verified")
 	}
-
-	var at AuthToken
-	err = json.Unmarshal(b, &at)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	if at.Error == "" && at.AccessToken != "" {
-		fmt.Println("\nVerified")
-		conf.AccessToken = at.AccessToken
-		if at.RefreshToken != "" {
-			conf.RefreshToken = at.RefreshToken
-		}
-		conf.ExpiredAt = time.Now().Add(time.Duration(at.ExpiresIn) * time.Second)
-
-		err := writeConf(conf)
-		if err != nil {
-			fmt.Println(err)
-		}
-		return
-	}
+	return
 }
 
 func main() {
 
-	conf, err := loadConf()
+	conf, err := loadConfig()
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -207,5 +206,4 @@ func main() {
 	}
 
 	fmt.Println("Nothing to be done")
-
 }
